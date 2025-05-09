@@ -1,0 +1,200 @@
+#requires -RunAsAdministrator # Indicates the need for admin; actual check is below.
+
+# --- Script Configuration ---
+$RustDeskExePath = "C:\Program Files\RustDesk\rustdesk.exe"
+$RustDeskConfigPath = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config\RustDesk.toml" # Critical: Ensure this is the correct path for your RustDesk version.
+
+# --- Helper Functions ---
+
+function Get-CurrentRustDeskId {
+    param(
+        [string]$RustDeskPath
+    )
+    if (-not (Test-Path $RustDeskPath)) {
+        Write-Warning "RustDesk executable not found at $RustDeskPath"
+        return $null
+    }
+    try {
+        $idOutput = & $RustDeskPath --get-id 2>&1 # Capture stdout and stderr
+        if ($LASTEXITCODE -ne 0 -or $idOutput -like "*error*") { # Basic error check
+            Write-Warning "Failed to get RustDesk ID. Command output: $idOutput"
+            return $null
+        }
+        return $idOutput.Trim() # Trim whitespace
+    }
+    catch {
+        Write-Warning "Exception while getting RustDesk ID: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Update-RustDeskConfig {
+    param(
+        [string]$NewIdValue,
+        [string]$ConfigPath,
+        [string]$RustDeskExe,
+        [string]$CurrentRustDeskDisplayedId # For display purposes
+    )
+
+    Write-Host "`nAttempting to update RustDesk ID to '$NewIdValue'..."
+    $backupPath = "" # Initialize to avoid issues if backup fails early
+
+    try {
+        # 1. Stop RustDesk Service and Process
+        Write-Host "Stopping RustDesk service and process..."
+        Stop-Service RustDesk -ErrorAction SilentlyContinue -Force # Force to stop if dependent services
+        Start-Sleep -Seconds 1 # Give it a moment
+        Stop-Process -Name "rustdesk" -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1 # Give it a moment
+
+        # 2. Check Config File
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Error "RustDesk config file not found at '$ConfigPath'"
+            return $false
+        }
+
+        # 3. Backup Config File
+        $timestamp = Get-Date -Format 'yyyyMMddHHmmss'
+        $backupPath = "$($ConfigPath).$($timestamp).bak"
+        Write-Host "Backing up current config to '$backupPath'..."
+        Copy-Item -Path $ConfigPath -Destination $backupPath -Force -ErrorAction Stop
+
+        # 4. Prepare New ID Line
+        # This assumes the ID line in RustDesk.toml is like: id = "your_id_value"
+        # The quotes around $NewIdValue are important.
+        $newIdLineForFile = "id = ""$($NewIdValue)""" # e.g., id = "MyNewID123" or id = "123456789"
+
+        # 5. Read current config and replace the ID line
+        # THIS IS THE FRAGILE PART: It assumes the ID is the first line and replaces it.
+        # If `id = "..."` is not the first line, this logic will fail or corrupt the file.
+        $fileContent = Get-Content -Path $ConfigPath -ErrorAction Stop
+        $currentIdLineInFile = $fileContent | Select-Object -Index 0 # Get the first line
+
+        Write-Host "Current displayed RustDesk ID: $CurrentRustDeskDisplayedId"
+        Write-Host "Current first line in config: $currentIdLineInFile"
+        Write-Host "New ID line to be written: $newIdLineForFile"
+
+        # Replace the old first line with the new ID line
+        $newContent = @($newIdLineForFile) + ($fileContent | Select-Object -Skip 1)
+
+        # 6. Write New Config
+        Set-Content -Path $ConfigPath -Value $newContent -Force -ErrorAction Stop
+        Write-Host "RustDesk config file updated."
+
+        # 7. Restart RustDesk Service and Application
+        Write-Host "Restarting RustDesk service and application..."
+        Start-Service RustDesk -ErrorAction Stop
+        Start-Sleep -Seconds 2 # Give service time to start
+        Start-Process -FilePath $RustDeskExe -ArgumentList "--tray" -ErrorAction Stop # RustDesk might need --tray to start minimized
+        
+        Write-Host "`nSUCCESS: RustDesk ID update process completed."
+        Write-Host "The new ID '$NewIdValue' should be active. Please verify in RustDesk."
+        return $true
+
+    } catch {
+        Write-Error "`nERROR: An error occurred during the RustDesk ID update process."
+        Write-Error "Details: $($_.Exception.Message)"
+        if (Test-Path $backupPath) {
+            Write-Warning "Attempting to restore config from backup: '$backupPath'..."
+            try {
+                Copy-Item -Path $backupPath -Destination $ConfigPath -Force -ErrorAction Stop
+                Write-Host "Config restored from backup."
+                Write-Warning "Please check RustDesk service and application status."
+                Start-Service RustDesk -ErrorAction SilentlyContinue # Try to restart even after failure
+            } catch {
+                Write-Error "Failed to restore config from backup: $($_.Exception.Message)"
+                Write-Error "The RustDesk config file at '$ConfigPath' might be corrupted!"
+            }
+        } else {
+            Write-Warning "No backup file found or backup was not created. Config could not be restored."
+        }
+        return $false
+    }
+}
+
+# --- Main Script Logic ---
+
+# 1. Check for Administrator Privileges
+if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Error "Administrator privileges are required for this script."
+    Write-Warning "Please re-run this command from an ELEVATED PowerShell prompt."
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+# 2. Check RustDesk Installation
+if (-not (Test-Path $RustDeskExePath)) {
+    Write-Error "`nRustDesk application not found at '$RustDeskExePath'."
+    Write-Warning "Please ensure RustDesk is installed in the default location or update the \$RustDeskExePath variable in the script."
+    Read-Host "Press Enter to exit"
+    exit 1
+}
+
+# 3. Main Menu Loop
+do {
+    Clear-Host # Clear screen for better readability
+    $currentId = Get-CurrentRustDeskId -RustDeskPath $RustDeskExePath
+    Write-Host "-------------------------------------------------------"
+    Write-Host " RustDesk ID Changer"
+    Write-Host "-------------------------------------------------------"
+    if ($currentId) {
+        Write-Host " Current RustDesk ID: $currentId"
+    } else {
+        Write-Warning " Could not retrieve current RustDesk ID. Check RustDesk installation."
+    }
+    Write-Host "-------------------------------------------------------"
+    Write-Host " Menu:"
+    Write-Host "   1 - Set ID to Computer Name ($($env:COMPUTERNAME))"
+    Write-Host "   2 - Set ID to a 9-digit Random Number"
+    Write-Host "   3 - Set ID to a Specific Value You Enter"
+    Write-Host "   4 - Exit"
+    Write-Host "-------------------------------------------------------"
+
+    $choice = Read-Host "Enter your choice (1-4)"
+    $newRustDeskIdValue = $null # Reset
+
+    switch ($choice) {
+        "1" {
+            $newRustDeskIdValue = $env:COMPUTERNAME
+            Write-Host "Selected: Set ID to Computer Name '$newRustDeskIdValue'"
+        }
+        "2" {
+            $newRustDeskIdValue = -join ((1..9) | ForEach-Object { Get-Random -Minimum 0 -Maximum 9 })
+            Write-Host "Selected: Set ID to Random Number '$newRustDeskIdValue'"
+        }
+        "3" {
+            $userInputId = Read-Host "Enter the new RustDesk ID (e.g., MyCustomID123). Must be at least 6 characters"
+            if ($null -ne $userInputId -and $userInputId.Trim().Length -ge 6) {
+                $newRustDeskIdValue = $userInputId.Trim()
+                Write-Host "Selected: Set ID to Specific Value '$newRustDeskIdValue'"
+            } else {
+                Write-Warning "Invalid ID entered. Must be at least 6 characters long and not empty."
+            }
+        }
+        "4" {
+            Write-Host "Exiting RustDesk ID Changer."
+            # No action needed, loop will terminate
+        }
+        default {
+            Write-Warning "Invalid choice '$choice'. Please select a number from 1 to 4."
+        }
+    }
+
+    if ($newRustDeskIdValue) {
+        Write-Host "`nPreparing to change RustDesk ID..."
+        # Confirmation before proceeding
+        $confirm = Read-Host "Are you sure you want to change the RustDesk ID to '$newRustDeskIdValue'? (y/n)"
+        if ($confirm -eq 'y') {
+            Update-RustDeskConfig -NewIdValue $newRustDeskIdValue -ConfigPath $RustDeskConfigPath -RustDeskExe $RustDeskExePath -CurrentRustDeskDisplayedId $currentId
+        } else {
+            Write-Host "ID change cancelled by user."
+        }
+    }
+
+    if ($choice -ne "4") {
+        Read-Host "`nPress Enter to return to the menu..."
+    }
+
+} while ($choice -ne "4")
+
+Write-Host "Script finished."
