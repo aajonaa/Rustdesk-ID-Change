@@ -16,7 +16,7 @@
 - Linux using the bash script to run it
 - MacOs using the bash script to run it
 
-## The logic behind the linux id change(v1.3.8 verified)
+## The logic behind the win id change(v1.3.8 verified)
 
 ### General process: Back toml file -> Add a new line to toml file (id = "desired_id") -> start the rustdesk
 
